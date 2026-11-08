@@ -56,15 +56,9 @@ router.get('/', requireAuth, async function (req, res) {
   return res.json({ code: 0, data: Object.assign(walletView(w), { coupons: coupons }) })
 })
 
-/** 充值（演示通道，微信支付接入后替换） */
+/** 充值：微信支付接入前关闭（防止无支付凭证直接加余额） */
 router.post('/recharge', requireAuth, async function (req, res) {
-  const amount = num((req.body || {}).amount)
-  if (!(amount > 0)) return fail(res, '充值金额不正确')
-  if (amount > 1000000) return fail(res, '单笔充值过大')
-  await ensureWallet(req.account.id)
-  await db.query('UPDATE wallets SET balance = balance + ? WHERE account_id = ?', [amount, req.account.id])
-  const w = await db.queryOne('SELECT * FROM wallets WHERE account_id = ?', [req.account.id])
-  return res.json({ code: 0, data: walletView(w), msg: '充值成功' })
+  return fail(res, '充值功能暂未开放，请联系客服', 403)
 })
 
 /** 余额支付扣款 */
@@ -78,19 +72,31 @@ router.post('/pay', requireAuth, async function (req, res) {
   return res.json({ code: 0, data: walletView(w2), msg: '支付成功' })
 })
 
-/** 退款回充 */
+/** 退款回充：必须对应本人已取消的余额支付订单，金额与实付一致，且未退过 */
 router.post('/refund', requireAuth, async function (req, res) {
-  const amount = num((req.body || {}).amount)
+  const body = req.body || {}
+  const orderId = body.orderId || body.id || ''
+  const amount = num(body.amount)
+  if (!orderId) return fail(res, '缺少订单号')
   if (!(amount > 0)) return fail(res, '退款金额不正确')
+  const o = await db.queryOne('SELECT id, account_id, pay_type, pay_amount, status, refunded FROM orders WHERE id = ?', [orderId])
+  if (!o) return fail(res, '订单不存在')
+  if (String(o.account_id) !== String(req.account.id)) return fail(res, '只能退自己的订单', 403)
+  if (o.status !== 'cancel') return fail(res, '仅已取消的订单可退款')
+  if ((o.pay_type || '') !== '余额支付') return fail(res, '该订单非余额支付，无需退款')
+  if (num(o.pay_amount) !== amount) return fail(res, '退款金额与实付不一致')
+  if (num(o.refunded)) return fail(res, '该订单已退款，请勿重复操作')
   await ensureWallet(req.account.id)
+  await db.query('UPDATE orders SET refunded = 1 WHERE id = ?', [orderId])
   await db.query('UPDATE wallets SET balance = balance + ? WHERE account_id = ?', [amount, req.account.id])
   const w = await db.queryOne('SELECT * FROM wallets WHERE account_id = ?', [req.account.id])
   return res.json({ code: 0, data: walletView(w), msg: '已退回余额' })
 })
 
-/** 积分变动（正负均可，不为负） */
+/** 积分变动（正负均可，不为负；限单笔幅度，防刷分） */
 router.post('/points', requireAuth, async function (req, res) {
   const delta = Number((req.body || {}).delta) || 0
+  if (Math.abs(delta) > 100) return fail(res, '积分变动幅度超出限制')
   await ensureWallet(req.account.id)
   await db.query('UPDATE wallets SET points = GREATEST(0, points + ?) WHERE account_id = ?', [delta, req.account.id])
   const w = await db.queryOne('SELECT * FROM wallets WHERE account_id = ?', [req.account.id])

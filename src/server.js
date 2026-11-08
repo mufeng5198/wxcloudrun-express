@@ -25,6 +25,11 @@ async function ensureSchema() {
       KEY idx_account (account_id),
       KEY idx_status (status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS settings (
+      k           VARCHAR(64) PRIMARY KEY,
+      v           JSON NULL,
+      update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `ALTER TABLE invite_refers ALTER COLUMN reward SET DEFAULT 10`
   ]
   for (let i = 0; i < DDL.length; i++) {

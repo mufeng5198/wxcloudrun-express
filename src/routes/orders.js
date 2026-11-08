@@ -48,6 +48,7 @@ function rowToOrder(r) {
     rejectedBy: parseJson(r.rejected_by, []),
     timeline: parseJson(r.timeline, []),
     dispatchCount: num(r.dispatch_count) || 1,
+    rating: num(r.rating),
     createTime: r.create_time ? new Date(r.create_time).getTime() : 0,
     createTimeText: r.create_time ? fmt(r.create_time) : '',
     updateTime: r.update_time ? new Date(r.update_time).getTime() : 0
@@ -62,7 +63,7 @@ function fmt(d) {
 
 function fail(res, msg, code) { return res.json({ code: code || 1, msg: msg }) }
 
-/** 客户端订单对象 → 入库参数 */
+/** 客户端订单对象 → 入库参数（rating = 老板结单后给打手的打分 1-5 星） */
 function orderToParams(o, accountId) {
   return [
     o.id,
@@ -91,13 +92,14 @@ function orderToParams(o, accountId) {
     jsonStr(o.takenBy),
     jsonStr(o.rejectedBy || []),
     jsonStr(o.timeline || []),
-    num(o.dispatchCount) || 1
+    num(o.dispatchCount) || 1,
+    Math.max(0, Math.min(5, num(o.rating)))
   ]
 }
 
-const INSERT_SQL = 'INSERT INTO orders (id, account_id, customer_phone, pkg_id, pkg_name, unit, price, `count`, total, discount, pay_amount, pay_type, map, service_time, remark, status, dispatch_mode, designated_player_id, designated_player_name, player_id, player_name, playmate_gender, female_fee, taken_by, rejected_by, timeline, dispatch_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+const INSERT_SQL = 'INSERT INTO orders (id, account_id, customer_phone, pkg_id, pkg_name, unit, price, `count`, total, discount, pay_amount, pay_type, map, service_time, remark, status, dispatch_mode, designated_player_id, designated_player_name, player_id, player_name, playmate_gender, female_fee, taken_by, rejected_by, timeline, dispatch_count, rating) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
 
-const UPDATE_SQL = 'UPDATE orders SET account_id = ?, customer_phone = ?, pkg_id = ?, pkg_name = ?, unit = ?, price = ?, `count` = ?, total = ?, discount = ?, pay_amount = ?, pay_type = ?, map = ?, service_time = ?, remark = ?, status = ?, dispatch_mode = ?, designated_player_id = ?, designated_player_name = ?, player_id = ?, player_name = ?, playmate_gender = ?, female_fee = ?, taken_by = ?, rejected_by = ?, timeline = ?, dispatch_count = ? WHERE id = ?'
+const UPDATE_SQL = 'UPDATE orders SET account_id = ?, customer_phone = ?, pkg_id = ?, pkg_name = ?, unit = ?, price = ?, `count` = ?, total = ?, discount = ?, pay_amount = ?, pay_type = ?, map = ?, service_time = ?, remark = ?, status = ?, dispatch_mode = ?, designated_player_id = ?, designated_player_name = ?, player_id = ?, player_name = ?, playmate_gender = ?, female_fee = ?, taken_by = ?, rejected_by = ?, timeline = ?, dispatch_count = ?, rating = ? WHERE id = ?'
 
 /**
  * 订单列表
@@ -151,32 +153,61 @@ router.get('/', requireAuth, async function (req, res) {
 router.post('/', requireAuth, async function (req, res) {
   const o = req.body || {}
   if (!o.id) return fail(res, '缺少订单号')
-  const dup = await db.queryOne('SELECT id FROM orders WHERE id = ?', [o.id])
+  const dup = await db.queryOne('SELECT id, account_id FROM orders WHERE id = ?', [o.id])
   if (dup) {
-    await db.query(UPDATE_SQL, orderToParams(o, req.account.id).slice(1).concat([o.id]))
+    // 已存在：保留原归属（打手/管理员同步推进订单时不能把单子改成自己的）
+    const ownerId = dup.account_id || req.account.id
+    await db.query(UPDATE_SQL, orderToParams(o, ownerId).slice(1).concat([o.id]))
     return res.json({ code: 0, data: { order: rowToOrder(await db.queryOne('SELECT * FROM orders WHERE id = ?', [o.id])) } })
   }
   await db.query(INSERT_SQL, orderToParams(o, req.account.id))
   return res.json({ code: 0, data: { order: rowToOrder(await db.queryOne('SELECT * FROM orders WHERE id = ?', [o.id])) } })
 })
 
-/** 离线补偿同步：整单覆盖写（幂等） */
+/** 离线补偿同步：整单覆盖写（幂等；保留原归属） */
 router.put('/:id', requireAuth, async function (req, res) {
   const o = req.body || {}
   if (!o.id || o.id !== req.params.id) return fail(res, '订单号不一致')
-  const exist = await db.queryOne('SELECT id FROM orders WHERE id = ?', [req.params.id])
+  const exist = await db.queryOne('SELECT id, account_id FROM orders WHERE id = ?', [req.params.id])
   if (exist) {
-    await db.query(UPDATE_SQL, orderToParams(o, req.account.id).slice(1).concat([req.params.id]))
+    const ownerId = exist.account_id || req.account.id
+    await db.query(UPDATE_SQL, orderToParams(o, ownerId).slice(1).concat([req.params.id]))
   } else {
     await db.query(INSERT_SQL, orderToParams(o, req.account.id))
   }
   return res.json({ code: 0, data: { order: rowToOrder(await db.queryOne('SELECT * FROM orders WHERE id = ?', [req.params.id])) } })
 })
 
+/** 订单详情：管理员看所有；打手看可接池和自己的；顾客只能看自己的 */
 router.get('/:id', requireAuth, async function (req, res) {
+  const me = req.account
   const row = await db.queryOne('SELECT * FROM orders WHERE id = ?', [req.params.id])
   if (!row) return fail(res, '订单不存在', 404)
-  return res.json({ code: 0, data: { order: rowToOrder(row) } })
+  const o = rowToOrder(row)
+
+  if (me.role === 'admin' || me.role === 'agent') {
+    return res.json({ code: 0, data: { order: o } })
+  }
+
+  if (me.role === 'player' && me.player_id) {
+    const takerId = (o.takenBy && o.takenBy.playerId) || o.playerId || ''
+    if (takerId === me.player_id || o.designatedPlayerId === me.player_id) {
+      return res.json({ code: 0, data: { order: o } })
+    }
+    if (o.status === 'pending') {
+      const visible = o.dispatchMode === 'designated'
+        ? o.designatedPlayerId === me.player_id
+        : (o.rejectedBy || []).indexOf(me.player_id) === -1
+      if (visible) return res.json({ code: 0, data: { order: o } })
+    }
+    return fail(res, '无权查看该订单', 403)
+  }
+
+  // 顾客：只能看自己下的单
+  if (String(o.accountId) === String(me.id)) {
+    return res.json({ code: 0, data: { order: o } })
+  }
+  return fail(res, '无权查看该订单', 403)
 })
 
 /** 打手接单 */
@@ -202,6 +233,7 @@ router.post('/:id/accept', requireAuth, async function (req, res) {
 /** 打手拒单 */
 router.post('/:id/reject', requireAuth, async function (req, res) {
   const me = req.account
+  if (me.role !== 'player' || !me.player_id) return fail(res, '只有打手能拒单')
   const row = await db.queryOne('SELECT * FROM orders WHERE id = ?', [req.params.id])
   if (!row) return fail(res, '订单不存在', 404)
   const o = rowToOrder(row)
@@ -221,13 +253,21 @@ router.post('/:id/reject', requireAuth, async function (req, res) {
   return res.json({ code: 0, msg: '已拒单，等待客服改派' })
 })
 
-/** 推进状态：accepted → checking → done */
+/** 推进状态：accepted → checking（接单打手）；checking → done（下单老板） */
 router.post('/:id/advance', requireAuth, async function (req, res) {
+  const me = req.account
   const row = await db.queryOne('SELECT * FROM orders WHERE id = ?', [req.params.id])
   if (!row) return fail(res, '订单不存在', 404)
   const o = rowToOrder(row)
   const next = o.status === 'accepted' ? 'checking' : (o.status === 'checking' ? 'done' : '')
   if (!next) return fail(res, '当前状态不可推进')
+  // 归属校验：交付只能接单打手（或管理端）操作，验收只能下单老板（或管理端）操作
+  const isAdminSide = me.role === 'admin' || me.role === 'agent'
+  const isTaker = me.role === 'player' && me.player_id && String(o.playerId) === String(me.player_id)
+  const isOwner = String(o.accountId) === String(me.id)
+  if (!isAdminSide && !isTaker && !isOwner) return fail(res, '无权操作该订单', 403)
+  if (next === 'checking' && !isAdminSide && !isTaker) return fail(res, '交付只能由接单打手操作', 403)
+  if (next === 'done' && !isAdminSide && !isOwner) return fail(res, '验收只能由下单老板操作', 403)
   const idx = next === 'checking' ? 3 : 4
   const timeline = (o.timeline || []).slice()
   if (timeline[idx]) timeline[idx] = Object.assign({}, timeline[idx], { done: true, time: fmt(new Date()) })

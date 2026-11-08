@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS orders (
   rejected_by             JSON,
   timeline                JSON,
   dispatch_count          INT NOT NULL DEFAULT 1,
+  rating                  TINYINT NOT NULL DEFAULT 0 COMMENT '老板结单后给打手的打分 1-5 星，0=未评',
+  refunded                TINYINT NOT NULL DEFAULT 0 COMMENT '余额支付订单退款标记 0=未退 1=已退（防重复退款）',
   create_time             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   update_time             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_status  (status),
@@ -65,6 +67,22 @@ CREATE TABLE IF NOT EXISTS invite_codes (
   phone       VARCHAR(20) NOT NULL,
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_phone (phone)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 微信支付支付单（type=recharge 充值到钱包 / type=order 直接支付订单；回调记 paid 并记账）
+CREATE TABLE IF NOT EXISTS pay_orders (
+  out_trade_no   VARCHAR(32) PRIMARY KEY,
+  account_id     BIGINT       NOT NULL,
+  type           VARCHAR(16)  NOT NULL DEFAULT 'recharge',
+  order_id       VARCHAR(40)  NOT NULL DEFAULT '',
+  amount         DECIMAL(10,2) NOT NULL,
+  payload        JSON NULL,
+  status         VARCHAR(16)  NOT NULL DEFAULT 'pending',
+  transaction_id VARCHAR(64)  NOT NULL DEFAULT '',
+  create_time    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  pay_time       DATETIME NULL,
+  KEY idx_account (account_id),
+  KEY idx_order (order_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 短信验证码表（手机号 + 验证码登录）

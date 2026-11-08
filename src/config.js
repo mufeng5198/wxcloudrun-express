@@ -39,6 +39,14 @@ module.exports = {
     expire: 300,      // 验证码有效期（秒）
     cooldown: 60,     // 同一手机号重发间隔（秒）
     maxAttempts: 5    // 单个验证码最多试错次数
+  },
+  // 微信支付（JSAPI，充值到钱包）：四项都配置后支付功能才生效
+  pay: {
+    mchid: process.env.WXPAY_MCHID || '',                  // 商户号
+    serial: process.env.WXPAY_SERIAL_NO || '',             // 商户 API 证书序列号
+    apiv3Key: process.env.WXPAY_APIV3_KEY || '',           // APIv3 密钥
+    keyPath: process.env.WXPAY_KEY_PATH || '',             // apiclient_key.pem 绝对路径
+    notifyUrl: process.env.WXPAY_NOTIFY_URL || ''          // 回调地址 https://公网域名/api/pay/notify
   }
 }
 
